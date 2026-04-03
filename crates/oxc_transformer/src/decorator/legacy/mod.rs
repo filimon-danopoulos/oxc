@@ -55,7 +55,7 @@ use oxc_semantic::{ScopeFlags, ScopeId, SymbolFlags};
 use oxc_span::SPAN;
 use oxc_syntax::operator::AssignmentOperator;
 use oxc_traverse::{Ancestor, BoundIdentifier, Traverse, ast_operations::get_var_name_from_node};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     Helper,
@@ -341,6 +341,8 @@ impl<'a> LegacyDecorator<'a> {
 
         let class_scope_id = class.scope_id();
         let mut new_body = ctx.ast.vec_with_capacity(class.body.body.len() * 3);
+        // Tracks storage names used in this class to avoid collisions (e.g. `prop` vs `_prop`).
+        let mut used_storage_names: FxHashSet<&str> = FxHashSet::default();
 
         for element in class.body.body.drain(..) {
             let ClassElement::AccessorProperty(accessor) = element else {
@@ -371,18 +373,16 @@ impl<'a> LegacyDecorator<'a> {
 
                 let getter_key = PropertyKey::from(assignment);
                 let setter_key = PropertyKey::from(reference);
-                let storage_name = ctx.ast.str_from_strs_array([
-                    "_",
-                    &get_var_name_from_node(&setter_key),
-                    "_computed_accessor_storage",
-                ]);
+                let key_part = get_var_name_from_node(&setter_key);
+                let base = ctx
+                    .ast
+                    .str_from_strs_array([&key_part, "_computed_accessor_storage"]);
+                let storage_name = unique_storage_name(&base, &mut used_storage_names, ctx);
                 (storage_name, getter_key, setter_key)
             } else {
-                let storage_name = ctx.ast.str_from_strs_array([
-                    "_",
-                    &get_var_name_from_node(&accessor.key),
-                    "_accessor_storage",
-                ]);
+                let key_part = get_var_name_from_node(&accessor.key);
+                let base = ctx.ast.str_from_strs_array([&key_part, "_accessor_storage"]);
+                let storage_name = unique_storage_name(&base, &mut used_storage_names, ctx);
                 let getter_key = accessor.key.clone_in(ctx.ast.allocator);
                 let setter_key = accessor.key.clone_in(ctx.ast.allocator);
                 (storage_name, getter_key, setter_key)
@@ -1501,4 +1501,28 @@ impl<'a> ClassReferenceChanger<'a, '_> {
 
         binding.create_read_reference(self.ctx)
     }
+}
+
+/// Returns a unique private-field storage name based on `base`, inserting it into `used`.
+fn unique_storage_name<'a>(
+    base: &str,
+    used: &mut FxHashSet<&'a str>,
+    ctx: &mut TraverseCtx<'a>,
+) -> Str<'a> {
+    let candidate = ctx.ast.str_from_strs_array(["_", base]);
+    let name = if !used.contains(candidate.as_str()) {
+        candidate
+    } else {
+        let mut i = 2u32;
+        loop {
+            let mut buf = itoa::Buffer::new();
+            let s = ctx.ast.str_from_strs_array(["_", base, buf.format(i)]);
+            if !used.contains(s.as_str()) {
+                break s;
+            }
+            i += 1;
+        }
+    };
+    used.insert(name.as_str());
+    name
 }
